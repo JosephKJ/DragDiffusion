@@ -41,6 +41,7 @@ def main():
     parser.add_argument('--start-layer', default=10, type=int)
 
     parser.add_argument('--do-lora-training', default=True, type=bool)
+    parser.add_argument('--do-masactrl', default=True, type=bool)
 
     args = parser.parse_args()
 
@@ -94,16 +95,20 @@ def main():
                                num_inference_steps=args.n_inference_step,
                                num_actual_inference_steps=args.n_actual_inference_step)
 
-    # hijack the attention module
-    # inject the reference branch to guide the generation
-    editor = MutualSelfAttentionControl(start_step=args.start_step,
-                                        start_layer=args.start_layer,
-                                        total_steps=args.n_inference_step,
-                                        guidance_scale=args.guidance_scale)
-    if args.lora_path == "":
-        register_attention_editor_diffusers(model, editor, attn_processor='attn_proc')
+    if args.do_masactrl:
+        # hijack the attention module
+        # inject the reference branch to guide the generation
+        editor = MutualSelfAttentionControl(start_step=args.start_step,
+                                            start_layer=args.start_layer,
+                                            total_steps=args.n_inference_step,
+                                            guidance_scale=args.guidance_scale)
+        if args.lora_path == "":
+            register_attention_editor_diffusers(model, editor, attn_processor='attn_proc')
+        else:
+            register_attention_editor_diffusers(model, editor, attn_processor='lora_attn_proc')
+        print('Hijack complete.')
     else:
-        register_attention_editor_diffusers(model, editor, attn_processor='lora_attn_proc')
+        print('Skipping feature hijack.')
 
     # inference the synthesized image
     gen_image = model(
