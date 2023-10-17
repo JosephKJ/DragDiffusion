@@ -14,6 +14,7 @@ from torchvision import transforms
 from accelerate import Accelerator
 from accelerate.utils import set_seed
 from PIL import Image
+from tqdm import tqdm
 
 from transformers import AutoTokenizer, PretrainedConfig
 
@@ -231,7 +232,13 @@ def train_lora(image,
         ]
     )
 
-    for step in progress.tqdm(range(lora_step), desc="training LoRA"):
+    print("progress has value:{}".format(progress))
+    if progress is not None:
+        iterator = progress.tqdm(range(lora_step), desc="Training LoRA")
+    else:
+        iterator = tqdm(range(lora_step), desc="Training LoRA")
+
+    for step in iterator:
         unet.train()
         image_batch = []
         for _ in range(lora_batch_size):
