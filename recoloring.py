@@ -1,5 +1,5 @@
 from argparse import ArgumentParser
-from PIL import Image
+from PIL import Image, ImageEnhance
 from utils.lora_utils import train_lora
 from utils.ui_utils import preprocess_image
 from diffusers import DDIMScheduler, AutoencoderKL, DPMSolverMultistepScheduler
@@ -17,7 +17,7 @@ import datetime
 
 def main():
     parser = ArgumentParser()
-    parser.add_argument('--image-path', default='./images/1.jpeg', type=str)
+    parser.add_argument('--image-path', default='./images/3.jpeg', type=str)
     parser.add_argument('--prompt', default='', type=str)
     parser.add_argument('--neg-prompt', default='', type=str)
     parser.add_argument('--model-path', default='runwayml/stable-diffusion-v1-5', type=str)
@@ -41,12 +41,14 @@ def main():
     parser.add_argument('--start-layer', default=10, type=int)
 
     parser.add_argument('--do-lora-training', default=True, type=bool)
-    parser.add_argument('--do-masactrl', default=True, type=bool)
 
     args = parser.parse_args()
 
-    image = Image.open(args.image_path) # .convert("RGB")
+    image = Image.open(args.image_path)
+    image_bw = Image.open(args.image_path).convert("L").convert("RGB")
+
     image = np.array(image)
+    image_bw = np.array(image_bw)
 
     if args.do_lora_training:
         print('LoRA training is enabled.')
@@ -78,6 +80,7 @@ def main():
     print(args)
 
     source_image = preprocess_image(image, device)
+    source_image_bw = preprocess_image(image_bw, device)
 
     # set LoRA
     if args.lora_path == "":
@@ -87,6 +90,14 @@ def main():
         print("Applying LoRA: " + args.lora_path)
         model.unet.load_attn_procs(args.lora_path)
 
+    # invert the source black and white image
+    # the latent code resolution is too small, only 64*64
+    invert_code_bw = model.invert(source_image_bw,
+                               args.prompt,
+                               guidance_scale=args.guidance_scale,
+                               num_inference_steps=args.n_inference_step,
+                               num_actual_inference_steps=args.n_actual_inference_step)
+
     # invert the source image
     # the latent code resolution is too small, only 64*64
     invert_code = model.invert(source_image,
@@ -95,48 +106,34 @@ def main():
                                num_inference_steps=args.n_inference_step,
                                num_actual_inference_steps=args.n_actual_inference_step)
 
-    if args.do_masactrl:
-        # hijack the attention module
-        # inject the reference branch to guide the generation
-        editor = MutualSelfAttentionControl(start_step=args.start_step,
-                                            start_layer=args.start_layer,
-                                            total_steps=args.n_inference_step,
-                                            guidance_scale=args.guidance_scale)
-        if args.lora_path == "":
-            register_attention_editor_diffusers(model, editor, attn_processor='attn_proc')
-        else:
-            register_attention_editor_diffusers(model, editor, attn_processor='lora_attn_proc')
-        print('Hijack complete.')
-    else:
-        print('Skipping feature hijack.')
+    for alpha in np.linspace(-20, 20, 1000):
+        # inference the synthesized image
+        gen_image = model(
+            prompt=args.prompt,
+            neg_prompt=args.neg_prompt,
+            batch_size=2, # batch size is 2 because we have reference init_code and updated init_code
+            latents=torch.cat([invert_code_bw, invert_code], dim=0),
+            guidance_scale=args.guidance_scale,
+            num_inference_steps=args.n_inference_step,
+            num_actual_inference_steps=args.n_actual_inference_step,
+            alpha=alpha
+            )[0].unsqueeze(dim=0)
 
-    # inference the synthesized image
-    gen_image = model(
-        prompt=args.prompt,
-        neg_prompt=args.neg_prompt,
-        batch_size=2, # batch size is 2 because we have reference init_code and updated init_code
-        latents=torch.cat([invert_code, invert_code], dim=0),
-        guidance_scale=args.guidance_scale,
-        num_inference_steps=args.n_inference_step,
-        num_actual_inference_steps=args.n_actual_inference_step
-        )[1].unsqueeze(dim=0)
+        # resize gen_image into the size of source_image
+        # we do this because shape of gen_image will be rounded to multipliers of 8
+        gen_image = F.interpolate(gen_image, (full_h, full_w), mode='bilinear')
 
-    # resize gen_image into the size of source_image
-    # we do this because shape of gen_image will be rounded to multipliers of 8
-    gen_image = F.interpolate(gen_image, (full_h, full_w), mode='bilinear')
+        # save the original image and synthesized image
+        save_result = torch.cat([
+            source_image * 0.5 + 0.5,
+            torch.ones((1,3,full_h,25)).cuda(),
+            gen_image[0:1]
+        ], dim=-1)
 
-    # save the original image, user editing instructions, synthesized image
-    save_result = torch.cat([
-        source_image * 0.5 + 0.5,
-        torch.ones((1,3,full_h,25)).cuda(),
-        torch.ones((1,3,full_h,25)).cuda(),
-        gen_image[0:1]
-    ], dim=-1)
-
-    if not os.path.isdir(args.save_dir):
-        os.mkdir(args.save_dir)
-    save_prefix = datetime.datetime.now().strftime("%Y-%m-%d-%H%M-%S")
-    save_image(save_result, os.path.join(args.save_dir, save_prefix + '.png'))
+        if not os.path.isdir(args.save_dir):
+            os.mkdir(args.save_dir)
+        save_prefix = datetime.datetime.now().strftime("%Y-%m-%d-%H%M-%S")
+        save_image(save_result, os.path.join(args.save_dir, save_prefix + '_' + str(alpha) + '.png'))
 
     print('Done.')
 

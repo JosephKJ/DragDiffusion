@@ -336,6 +336,7 @@ class DragPipeline(StableDiffusionPipeline):
         unconditioning=None,
         neg_prompt=None,
         return_intermediates=False,
+        alpha=10.,
         **kwds):
         DEVICE = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
@@ -384,6 +385,7 @@ class DragPipeline(StableDiffusionPipeline):
         self.scheduler.set_timesteps(num_inference_steps)
         # print("Valid timesteps: ", reversed(self.scheduler.timesteps))
         latents_list = [latents]
+        k = 0
         for i, t in enumerate(tqdm(self.scheduler.timesteps, desc="DDIM Sampler")):
             if num_actual_inference_steps is not None and i < num_inference_steps - num_actual_inference_steps:
                 continue
@@ -405,6 +407,12 @@ class DragPipeline(StableDiffusionPipeline):
             # is that scheduler version would clamp pred_x0 between [-1,1]
             # don't know if that's gonna have huge impact
             latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+            if k < 1:
+            # if t == 1:
+                latents[0] = latents[0] + alpha * torch.mean(latents[0]) * (latents[1] - latents[0])
+                k = k + 1
+                print('Updated {} times for {}'.format(k, t))
+                print('Mean: {} '.format(torch.mean(latents[0])))
             latents_list.append(latents)
 
         image = self.latent2image(latents, return_type="pt")
